@@ -104,7 +104,7 @@ Contributions welcome! Please read our contributing guidelines and submit pull r
 
 ## 📧 Contact
 
-**Ashutosh Kumar** - ashutokumar@nvidia.com
+**Ashutosh Kumar** - ashutosh.kumar@und.edu
 
 ---
 
