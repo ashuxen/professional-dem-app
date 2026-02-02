@@ -3,8 +3,16 @@
 ASTER DEM Processing Web App
 A Streamlit application for processing ASTER L1A data to create DEMs with coregistration options
 
+Supports both ASTER L1A data formats:
+- V003: ZIP files containing data directories (legacy format)
+- V004: Single HDF files (current format, recommended)
+
+Requirements:
+- ASP 3.6.0 build 2026-01 or later (for V004 HDF support)
+- Current: ASP 3.6.0 build 2026-02-01
+
 Features:
-1. ASTER L1A to DEM conversion using ASP
+1. ASTER L1A to DEM conversion using ASP (aster2asp)
 2. DEM coregistration to reference DEMs (COP30_E)
 3. DEM coregistration to altimetry points (ICESat-2)
 4. Complete end-to-end processing
@@ -12,6 +20,13 @@ Features:
 
 Author: AI Assistant
 Usage: streamlit run aster_dem_app.py
+
+Data Download: https://search.earthdata.nasa.gov/search
+Search for "AST_L1A" and select "ASTER L1A Reconstructed Unprocessed Instrument Data V004"
+
+References:
+- ASP ASTER Documentation: https://stereopipeline.readthedocs.io/en/latest/examples/aster.html
+- aster2asp Tool: https://stereopipeline.readthedocs.io/en/latest/tools/aster2asp.html
 """
 
 import streamlit as st
@@ -55,16 +70,48 @@ try:
 except ImportError:
     HAVE_OPENTOPO_UTILS = False
 
-# Import validation system
-try:
-    from validation_and_accuracy import run_comprehensive_validation
-    HAVE_VALIDATION = True
-except ImportError:
-    HAVE_VALIDATION = False
+# Validation system removed - Trust Score was not meaningful for DEM analysis
 
 # Configuration
-ASP_BIN_PATH = "/home/ashutokumar/Pinn_mass_balance/ASP_setup/StereoPipeline-3.6.0-alpha-2025-08-05-x86_64-Linux/bin"
+# ASP 3.6.0 (2026-02-01) supports V004 HDF format for ASTER L1A data
+ASP_BIN_PATH = "/home/ashutokumar/Pinn_mass_balance/ASP_setup/StereoPipeline-3.6.0-2026-02-01-x86_64-Linux/bin"
 OPENTOPO_API_KEY = "523da07408e277366b4b10399fc41d99"
+
+import re  # For ASP version parsing
+
+def check_asp_hdf_support():
+    """
+    Check if the installed ASP version supports V004 HDF format.
+    V004 HDF support requires ASP build 2026-01 or later.
+    
+    Returns: tuple (supports_hdf, asp_version, build_date)
+    """
+    try:
+        result = subprocess.run(
+            f"{ASP_BIN_PATH}/aster2asp --version",
+            shell=True, capture_output=True, text=True, timeout=30
+        )
+        output = result.stdout + result.stderr
+        
+        # Parse build date from output
+        # Example: "Build date: 2025-08-02"
+        build_match = re.search(r'Build date:\s*(\d{4}-\d{2}-\d{2})', output)
+        version_match = re.search(r'Stereo Pipeline\s+([\d.]+(?:-\w+)?)', output)
+        
+        asp_version = version_match.group(1) if version_match else "unknown"
+        build_date = build_match.group(1) if build_match else "unknown"
+        
+        # V004 HDF support requires build 2026-01 or later
+        if build_date != "unknown":
+            # Compare date strings (YYYY-MM-DD format allows string comparison)
+            supports_hdf = build_date >= "2026-01-01"
+        else:
+            supports_hdf = False
+            
+        return supports_hdf, asp_version, build_date
+        
+    except Exception as e:
+        return False, "unknown", "unknown"
 
 def setup_environment():
     """Setup ASP environment"""
@@ -78,6 +125,15 @@ def setup_environment():
         result = subprocess.run("aster2asp --version", shell=True, capture_output=True, text=True, timeout=10)
         if result.returncode == 0:
             st.sidebar.success("✅ ASP tools verified")
+            
+            # Check HDF support and display status
+            supports_hdf, asp_version, build_date = check_asp_hdf_support()
+            st.sidebar.info(f"📦 ASP {asp_version} (build {build_date})")
+            if supports_hdf:
+                st.sidebar.success("✅ V004 HDF format supported")
+            else:
+                st.sidebar.warning("⚠️ V004 HDF not supported (need ASP 2026-01+)")
+                st.sidebar.info("💡 Use V003 ZIP format instead")
         else:
             st.sidebar.error("❌ ASP tools not found in PATH")
     except Exception as e:
@@ -381,9 +437,64 @@ def run_command(cmd, show_output=True):
             st.error(f"Error running command: {e}")
             return False, str(e)
 
+
+def prepare_aster_data(input_file, output_dir):
+    """
+    Prepare ASTER L1A data for processing.
+    Supports both V003 (ZIP) and V004 (HDF) formats.
+    
+    V003: ZIP files containing data directories with TIFF images and metadata
+    V004: Single HDF file containing all image data and metadata (requires ASP 2026-01+)
+    
+    Returns: tuple (aster_path, is_hdf_file)
+        - aster_path: Path to ASTER data (directory for V003, HDF file for V004)
+        - is_hdf_file: True if V004 HDF format, False if V003 ZIP format
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Determine file type
+    file_lower = input_file.lower()
+    
+    if file_lower.endswith('.hdf'):
+        # V004 format: Single HDF file - check ASP version first
+        st.info("📦 Detected **ASTER L1A V004** format (HDF file)")
+        
+        # Check if ASP supports HDF
+        supports_hdf, asp_version, build_date = check_asp_hdf_support()
+        
+        if not supports_hdf:
+            st.error(f"""
+            ❌ **Your ASP version does not support V004 HDF format!**
+            
+            - **Your ASP**: {asp_version} (build {build_date})
+            - **Required**: ASP build **2026-01 or later**
+            
+            **Options:**
+            1. **Update ASP** to a newer version from [ASP Releases](https://github.com/NeoGeographyToolkit/StereoPipeline/releases)
+            2. **Use V003 ZIP format** - Download ASTER data in the older ZIP format if available
+            
+            See [ASP ASTER documentation](https://stereopipeline.readthedocs.io/en/latest/tools/aster2asp.html)
+            """)
+            return None, False
+        
+        st.success(f"✅ ASP {asp_version} supports HDF format")
+        st.success(f"✅ HDF file ready for processing: {os.path.basename(input_file)}")
+        return input_file, True
+    
+    elif file_lower.endswith('.zip'):
+        # V003 format: ZIP file - needs extraction
+        st.info("📦 Detected **ASTER L1A V003** format (ZIP file)")
+        return extract_aster_zip(input_file, output_dir), False
+    
+    else:
+        st.error(f"❌ Unsupported file format: {input_file}")
+        st.info("Supported formats: .hdf (V004) or .zip (V003)")
+        return None, False
+
+
 def extract_aster_zip(zip_file, output_dir):
-    """Extract ASTER L1A zip file"""
-    st.info("Extracting ASTER L1A data...")
+    """Extract ASTER L1A V003 zip file"""
+    st.info("Extracting ASTER L1A V003 data...")
     
     try:
         with zipfile.ZipFile(zip_file, 'r') as zip_ref:
@@ -419,29 +530,49 @@ def extract_aster_zip(zip_file, output_dir):
         st.error(f"Error extracting zip file: {e}")
         return None
 
-def process_aster_to_asp(aster_dir, output_prefix):
-    """Convert ASTER L1A to ASP format"""
+def process_aster_to_asp(aster_input, output_prefix, is_hdf_file=False):
+    """
+    Convert ASTER L1A to ASP format.
+    
+    Supports both formats:
+    - V003: aster2asp dataDir -o out (directory with TIFF/metadata files)
+    - V004: aster2asp input.hdf -o out (single HDF file)
+    
+    Args:
+        aster_input: Path to ASTER data (directory for V003, HDF file for V004)
+        output_prefix: Output prefix for ASP files
+        is_hdf_file: True if V004 HDF format, False if V003 directory format
+    """
     st.subheader("Step 1: Converting ASTER L1A to ASP format")
     
-    # Check what files are in the ASTER directory
-    if os.path.isdir(aster_dir):
-        aster_files = os.listdir(aster_dir)
-        st.info(f"ASTER directory contains: {aster_files}")
-        
-        # Look for HDF files
-        hdf_files = [f for f in aster_files if f.endswith('.hdf')]
-        if hdf_files:
-            st.info(f"Found HDF files: {hdf_files}")
-        else:
-            st.warning("No HDF files found in ASTER directory")
+    if is_hdf_file:
+        # V004 format: Single HDF file
+        if not os.path.isfile(aster_input):
+            st.error(f"HDF file does not exist: {aster_input}")
+            return False
+        st.info(f"📦 Processing V004 HDF file: {os.path.basename(aster_input)}")
     else:
-        st.error(f"ASTER directory does not exist: {aster_dir}")
-        return False
+        # V003 format: Directory with files
+        if os.path.isdir(aster_input):
+            aster_files = os.listdir(aster_input)
+            st.info(f"ASTER directory contains: {aster_files}")
+            
+            # Look for HDF files
+            hdf_files = [f for f in aster_files if f.endswith('.hdf')]
+            if hdf_files:
+                st.info(f"Found HDF files: {hdf_files}")
+            else:
+                st.warning("No HDF files found in ASTER directory")
+        else:
+            st.error(f"ASTER directory does not exist: {aster_input}")
+            return False
     
     os.makedirs(os.path.dirname(output_prefix), exist_ok=True)
     
-    # Try the aster2asp command
-    cmd = f"aster2asp {aster_dir} -o {output_prefix}"
+    # Build aster2asp command - same command works for both formats
+    # V004: aster2asp input.hdf -o out
+    # V003: aster2asp dataDir -o out
+    cmd = f"aster2asp {aster_input} -o {output_prefix}"
     st.info(f"Running command: {cmd}")
     
     success, output = run_command(cmd)
@@ -835,106 +966,6 @@ def analyze_dem(dem_file, alignment_prefix=None, reference_points=None):
                 total_pixels = dem_masked.size
                 completeness = (valid_pixels / total_pixels) * 100
                 st.metric("Data Completeness", f"{completeness:.1f}%")
-            
-            # Run comprehensive validation if available
-            if HAVE_VALIDATION:
-                st.subheader("🔍 Validation & Accuracy Assessment")
-                
-                with st.spinner("Running comprehensive validation..."):
-                    try:
-                        validation_results = run_comprehensive_validation(
-                            dem_file=dem_file,
-                            alignment_prefix=alignment_prefix,
-                            reference_points=reference_points,
-                            output_dir=os.path.join(os.path.dirname(dem_file), "validation")
-                        )
-                        
-                        if validation_results:
-                            # Display trust score prominently
-                            trust_score = validation_results['trust_score']
-                            
-                            # Color-code trust score
-                            if trust_score >= 80:
-                                score_color = "green"
-                                quality_level = "Excellent"
-                            elif trust_score >= 60:
-                                score_color = "orange"
-                                quality_level = "Good"
-                            elif trust_score >= 40:
-                                score_color = "red"
-                                quality_level = "Fair"
-                            else:
-                                score_color = "darkred"
-                                quality_level = "Poor"
-                            
-                            st.markdown(f"""
-                            <div style="text-align: center; padding: 20px; border-radius: 10px; background-color: {score_color}20; border: 2px solid {score_color};">
-                                <h2 style="color: {score_color};">Trust Score: {trust_score}/100</h2>
-                                <h3>Quality Level: {quality_level}</h3>
-                            </div>
-                            """, unsafe_allow_html=True)
-                            
-                            # Display validation metrics
-                            validator = validation_results['validator']
-                            
-                            if 'positional_accuracy' in validator.accuracy_metrics:
-                                acc = validator.accuracy_metrics['positional_accuracy']
-                                
-                                st.subheader("📊 Positional Accuracy Metrics")
-                                
-                                col1, col2, col3 = st.columns(3)
-                                with col1:
-                                    st.metric("RMSE", f"{acc['rmse']:.3f} m")
-                                    st.metric("Mean Absolute Error", f"{acc['mae']:.3f} m")
-                                with col2:
-                                    st.metric("Standard Deviation", f"{acc['std_dev']:.3f} m")
-                                    st.metric("Sample Size", f"{acc['sample_size']} points")
-                                with col3:
-                                    st.metric("ASPRS Classification", acc['asprs_class'])
-                                    st.metric("Linear Error 95%", f"{acc['linear_error_95']:.3f} m")
-                            
-                            # Display key findings
-                            if hasattr(validator, 'validation_results') and 'summary' in validator.validation_results:
-                                summary = validator.validation_results['summary']
-                                
-                                if summary.get('key_findings'):
-                                    st.subheader("🔍 Key Findings")
-                                    for finding in summary['key_findings']:
-                                        st.success(f"✅ {finding}")
-                                
-                                if summary.get('recommendations'):
-                                    st.subheader("💡 Recommendations")
-                                    for rec in summary['recommendations']:
-                                        st.info(f"💡 {rec}")
-                            
-                            # Provide validation report download
-                            if validation_results['report_file'] and os.path.exists(validation_results['report_file']):
-                                with open(validation_results['report_file'], 'r') as f:
-                                    report_data = f.read()
-                                
-                                st.download_button(
-                                    label="📄 Download Validation Report (JSON)",
-                                    data=report_data,
-                                    file_name=f"validation_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-                                    mime="application/json"
-                                )
-                                
-                                # Also provide text summary if available
-                                summary_file = validation_results['report_file'].replace('.json', '_summary.txt')
-                                if os.path.exists(summary_file):
-                                    with open(summary_file, 'r') as f:
-                                        summary_data = f.read()
-                                    
-                                    st.download_button(
-                                        label="📄 Download Summary Report (TXT)",
-                                        data=summary_data,
-                                        file_name=f"validation_summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt",
-                                        mime="text/plain"
-                                    )
-                        
-                    except Exception as e:
-                        st.warning(f"Validation failed: {e}")
-                        st.info("Proceeding with basic DEM analysis...")
             
             # Create visualization
             fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
@@ -1419,30 +1450,30 @@ def main():
         st.header("🔧 ASTER L1A to DEM Processing")
         
         uploaded_file = st.file_uploader(
-            "Upload ASTER L1A ZIP file", 
-            type=['zip'],
-            help="Upload your ASTER L1A zip file (e.g., AST_L1A_*.zip)"
+            "Upload ASTER L1A file (ZIP or HDF)", 
+            type=['zip', 'hdf'],
+            help="Upload ASTER L1A V003 (.zip) or V004 (.hdf) file"
         )
         
         if uploaded_file is not None:
             # Create temporary directory
             with tempfile.TemporaryDirectory() as temp_dir:
                 # Save uploaded file
-                zip_path = os.path.join(temp_dir, uploaded_file.name)
-                with open(zip_path, 'wb') as f:
+                input_path = os.path.join(temp_dir, uploaded_file.name)
+                with open(input_path, 'wb') as f:
                     f.write(uploaded_file.getbuffer())
                 
                 st.success(f"✅ Uploaded: {uploaded_file.name} ({uploaded_file.size / 1024 / 1024:.1f} MB)")
                 
                 if st.button("🚀 Process ASTER Data to DEM"):
-                    # Extract ASTER data
+                    # Prepare ASTER data (handles both V003 ZIP and V004 HDF)
                     extract_dir = os.path.join(temp_dir, "extracted")
-                    aster_dir = extract_aster_zip(zip_path, extract_dir)
+                    aster_input, is_hdf = prepare_aster_data(input_path, extract_dir)
                     
-                    if aster_dir:
+                    if aster_input:
                         # Convert to ASP format
                         asp_output_prefix = os.path.join(temp_dir, "asp_output", "out")
-                        if process_aster_to_asp(aster_dir, asp_output_prefix):
+                        if process_aster_to_asp(aster_input, asp_output_prefix, is_hdf):
                             
                             # Find generated files
                             asp_dir = os.path.dirname(asp_output_prefix)
@@ -1692,9 +1723,9 @@ def main():
         st.header("🔄 Complete ASTER DEM Processing Pipeline")
         
         uploaded_file = st.file_uploader(
-            "Upload ASTER L1A ZIP file", 
-            type=['zip'],
-            help="Upload your ASTER L1A zip file for complete processing"
+            "Upload ASTER L1A file (ZIP or HDF)", 
+            type=['zip', 'hdf'],
+            help="Upload ASTER L1A V003 (.zip) or V004 (.hdf) file for complete processing"
         )
         
         # Processing options
@@ -1761,8 +1792,8 @@ def main():
             
             with tempfile.TemporaryDirectory() as temp_dir:
                 # Save uploaded file
-                zip_path = os.path.join(temp_dir, uploaded_file.name)
-                with open(zip_path, 'wb') as f:
+                input_path = os.path.join(temp_dir, uploaded_file.name)
+                with open(input_path, 'wb') as f:
                     f.write(uploaded_file.getbuffer())
                 
                 st.success(f"✅ Starting complete processing for: {uploaded_file.name}")
@@ -1772,15 +1803,15 @@ def main():
                 status_text = st.empty()
                 
                 try:
-                    # Step 1: Extract ASTER data
-                    status_text.text("Step 1/6: Extracting ASTER data...")
+                    # Step 1: Prepare ASTER data (handles both V003 ZIP and V004 HDF)
+                    status_text.text("Step 1/6: Preparing ASTER data...")
                     progress_bar.progress(10)
                     
                     extract_dir = os.path.join(temp_dir, "extracted")
-                    aster_dir = extract_aster_zip(zip_path, extract_dir)
+                    aster_input, is_hdf = prepare_aster_data(input_path, extract_dir)
                     
-                    if not aster_dir:
-                        st.error("❌ Failed to extract ASTER data")
+                    if not aster_input:
+                        st.error("❌ Failed to prepare ASTER data")
                         return
                     
                     # Step 2: Convert to ASP format
@@ -1788,7 +1819,7 @@ def main():
                     progress_bar.progress(20)
                     
                     asp_output_prefix = os.path.join(temp_dir, "asp_output", "out")
-                    if not process_aster_to_asp(aster_dir, asp_output_prefix):
+                    if not process_aster_to_asp(aster_input, asp_output_prefix, is_hdf):
                         st.error("❌ Failed to convert to ASP format")
                         return
                     
@@ -1975,7 +2006,7 @@ def main():
         **AOI (Area of Interest)** is the glacier outline you upload as a GeoPackage (`.gpkg`). The app reprojects that polygon to the DEM CRS and rasterizes it to a mask so all steps below operate strictly *on-glacier*.
 
         ### What this mode does
-        1. **Extract** ASTER L1A zip  
+        1. **Prepare** ASTER L1A data (V003 ZIP or V004 HDF)  
         2. **Convert for ASP** with `aster2asp` (Band3N/Band3B + cameras)  
         3. **Stereo** (`stereo -t aster …`) → point cloud (`*-PC.tif`)  
         4. **Grid** to DEM via `point2dem`  
@@ -2001,8 +2032,8 @@ def main():
 
         # Ask for BOTH inputs up front
         uploaded_file = st.file_uploader(
-            "Upload ASTER L1A ZIP file", type=['zip'],
-            help="Upload your ASTER L1A zip file (e.g., AST_L1A_*.zip)"
+            "Upload ASTER L1A file (ZIP or HDF)", type=['zip', 'hdf'],
+            help="Upload ASTER L1A V003 (.zip) or V004 (.hdf) file"
         )
         aoi_file = st.file_uploader(
             "Upload Glacier Boundary (.gpkg)", type=['gpkg'],
@@ -2020,31 +2051,31 @@ def main():
         run_btn = st.button("🚀 Run End-to-End + Glacier Outline")
 
         if run_btn and (uploaded_file is None or aoi_file is None):
-            st.warning("Please upload both the ASTER L1A ZIP and the glacier boundary .gpkg.")
+            st.warning("Please upload both the ASTER L1A file and the glacier boundary .gpkg.")
         if uploaded_file is not None and aoi_file is not None and run_btn:
             clear_cache_and_cleanup()
             with tempfile.TemporaryDirectory() as temp_dir:
                 # Save inputs
-                zip_path = os.path.join(temp_dir, uploaded_file.name)
-                with open(zip_path, 'wb') as f:
+                input_path = os.path.join(temp_dir, uploaded_file.name)
+                with open(input_path, 'wb') as f:
                     f.write(uploaded_file.getbuffer())
                 gpkg_path = os.path.join(temp_dir, aoi_file.name)
                 with open(gpkg_path, 'wb') as f:
                     f.write(aoi_file.getbuffer())
 
-                st.success(f"✅ Inputs: {os.path.basename(zip_path)}, {os.path.basename(gpkg_path)}")
+                st.success(f"✅ Inputs: {os.path.basename(input_path)}, {os.path.basename(gpkg_path)}")
                 progress_bar = st.progress(0); status_text = st.empty()
                 try:
-                    # 1) Extract
-                    status_text.text("Step 1/7: Extracting ASTER data…"); progress_bar.progress(10)
+                    # 1) Prepare ASTER data (handles both V003 ZIP and V004 HDF)
+                    status_text.text("Step 1/7: Preparing ASTER data…"); progress_bar.progress(10)
                     extract_dir = os.path.join(temp_dir, "extracted")
-                    aster_dir = extract_aster_zip(zip_path, extract_dir)
-                    if not aster_dir: st.stop()
+                    aster_input, is_hdf = prepare_aster_data(input_path, extract_dir)
+                    if not aster_input: st.stop()
 
                     # 2) aster2asp
                     status_text.text("Step 2/7: Converting to ASP format…"); progress_bar.progress(20)
                     asp_output_prefix = os.path.join(temp_dir, "asp_output", "out")
-                    if not process_aster_to_asp(aster_dir, asp_output_prefix): st.stop()
+                    if not process_aster_to_asp(aster_input, asp_output_prefix, is_hdf): st.stop()
 
                     # 3) stereo
                     status_text.text("Step 3/7: Stereo processing…"); progress_bar.progress(35)
